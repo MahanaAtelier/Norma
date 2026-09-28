@@ -30,9 +30,9 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name:       - name: Android SDK 35
+      - name: Android SDK 35
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          SDKMANAGER="/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
