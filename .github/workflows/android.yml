@@ -25,16 +25,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Android 35
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
+      - name: Android SDK 35
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Rozbalit projekt
         run: unzip -q Norma_Android_Project.zip
@@ -56,4 +55,5 @@ jobs:
         with:
           name: Norma-Android-APK
           path: Norma-beta.apk
+          if-no-files-found: error
           retention-days: 30
