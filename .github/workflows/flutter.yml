@@ -1,4 +1,4 @@
-name: Build PRIDEL Flutter APK
+name: Bootstrap PRIDEL Flutter project
 
 on:
   workflow_dispatch:
@@ -8,65 +8,137 @@ on:
       - '.github/workflows/flutter.yml'
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: pridel-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  bootstrap:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Flutter stable
+      - name: Flutter 3.47.5
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: '3.47.5'
           cache: true
 
-      - name: Unpack and validate source
+      - name: Create full Android Flutter project
         run: |
-          rm -rf /tmp/pridel_source /tmp/pridel
+          rm -rf /tmp/pridel_source /tmp/pridel_full
           mkdir -p /tmp/pridel_source
           unzip -q Pridel_Flutter_Source.zip -d /tmp/pridel_source
-          python /tmp/pridel_source/tool/validate_seed.py
-          python /tmp/pridel_source/tool/validate_project.py
+          flutter create --platforms=android --org sk.pridel --project-name pridel /tmp/pridel_full
+          rm -rf /tmp/pridel_full/lib /tmp/pridel_full/assets /tmp/pridel_full/test /tmp/pridel_full/tool
+          cp -R /tmp/pridel_source/lib /tmp/pridel_full/lib
+          cp -R /tmp/pridel_source/assets /tmp/pridel_full/assets
+          cp -R /tmp/pridel_source/test /tmp/pridel_full/test
+          cp -R /tmp/pridel_source/tool /tmp/pridel_full/tool
+          cp /tmp/pridel_source/pubspec.yaml /tmp/pridel_full/pubspec.yaml
+          cp /tmp/pridel_source/analysis_options.yaml /tmp/pridel_full/analysis_options.yaml
+          cp /tmp/pridel_source/README.md /tmp/pridel_full/README.md
+          cd /tmp/pridel_full
+          flutter pub get
+          python3 tool/configure_android.py .
+          dart run flutter_launcher_icons
+          dart format lib test tool
+          python3 tool/validate_seed.py
+          python3 tool/validate_project.py
+          python3 tool/validate_android.py .
+          flutter analyze
+          flutter test
+          flutter build apk --release --build-number "${{ github.run_number }}"
+          cd "$GITHUB_WORKSPACE"
+          rm -rf pridel
+          cp -R /tmp/pridel_full pridel
 
-      - name: Create clean Flutter project
+      - name: Install permanent full-project workflow
         run: |
-          flutter create --platforms=android,ios --org sk.pridel --project-name pridel /tmp/pridel
-          cp /tmp/pridel_source/pubspec.yaml /tmp/pridel/pubspec.yaml
-          cp /tmp/pridel_source/analysis_options.yaml /tmp/pridel/analysis_options.yaml
-          rm -rf /tmp/pridel/lib /tmp/pridel/assets /tmp/pridel/test
-          cp -R /tmp/pridel_source/lib /tmp/pridel/lib
-          cp -R /tmp/pridel_source/assets /tmp/pridel/assets
-          cp -R /tmp/pridel_source/test /tmp/pridel/test
-          sed -i 's/android:label="pridel"/android:label="PRÍDEL" android:allowBackup="false" android:usesCleartextTraffic="false"/' /tmp/pridel/android/app/src/main/AndroidManifest.xml
+          cat > .github/workflows/flutter.yml <<'EOF'
+          name: Build PRIDEL Flutter APK
 
-      - name: Dependencies
-        working-directory: /tmp/pridel
-        run: flutter pub get
+          on:
+            workflow_dispatch:
+            push:
+              paths:
+                - 'pridel/**'
+                - '.github/workflows/flutter.yml'
 
-      - name: Analyze
-        working-directory: /tmp/pridel
-        run: flutter analyze
+          permissions:
+            contents: read
 
-      - name: Tests
-        working-directory: /tmp/pridel
-        run: flutter test
+          concurrency:
+            group: pridel-build-${{ github.ref }}
+            cancel-in-progress: true
 
-      - name: Build debug APK
-        working-directory: /tmp/pridel
-        run: flutter build apk --debug
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              timeout-minutes: 40
+              defaults:
+                run:
+                  working-directory: pridel
 
-      - name: Prepare artifact
-        run: cp /tmp/pridel/build/app/outputs/flutter-apk/app-debug.apk PRIDEL-Flutter-beta.apk
+              steps:
+                - name: Checkout
+                  uses: actions/checkout@v4
 
-      - name: Upload APK
+                - name: Flutter 3.47.5
+                  uses: subosito/flutter-action@v2
+                  with:
+                    flutter-version: '3.47.5'
+                    cache: true
+
+                - name: Dependencies
+                  run: flutter pub get
+
+                - name: Validate formatting
+                  run: dart format --output=none --set-exit-if-changed lib test tool
+
+                - name: Validate data and Android project
+                  run: |
+                    python3 tool/validate_seed.py
+                    python3 tool/validate_project.py
+                    python3 tool/validate_android.py .
+
+                - name: Analyze
+                  run: flutter analyze
+
+                - name: Tests
+                  run: flutter test
+
+                - name: Build release APK
+                  run: flutter build apk --release --build-number "${{ github.run_number }}"
+
+                - name: Upload APK
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: PRIDEL-Flutter-APK
+                    path: pridel/build/app/outputs/flutter-apk/app-release.apk
+                    if-no-files-found: error
+                    retention-days: 30
+          EOF
+
+      - name: Commit complete project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pridel .github/workflows/flutter.yml
+          git commit -m "Migrate PRIDEL to full Flutter project" || true
+          git push
+
+      - name: Upload APK from bootstrap build
         uses: actions/upload-artifact@v4
         with:
           name: PRIDEL-Flutter-APK
-          path: PRIDEL-Flutter-beta.apk
+          path: pridel/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
