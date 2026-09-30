@@ -1,0 +1,173 @@
+name: Build PRIDEL Flutter APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Pridel_Flutter_Source.zip'
+      - 'pridel/**'
+      - '.github/workflows/flutter.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pridel-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Flutter 3.47.5
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.5'
+          cache: true
+
+      - name: SQLite runtime for tests
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: Prepare full Flutter project
+        id: prepare
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ -d pridel/android && -f pridel/pubspec.yaml ]]; then
+            echo "Using existing full Flutter project from pridel/."
+            PROJECT_DIR="$GITHUB_WORKSPACE/pridel"
+            BOOTSTRAPPED=false
+          else
+            echo "Bootstrapping pridel/ from Pridel_Flutter_Source.zip."
+            rm -rf /tmp/pridel_full
+            flutter create --platforms=android --org sk.pridel --project-name pridel /tmp/pridel_full
+            PROJECT_DIR="/tmp/pridel_full"
+            BOOTSTRAPPED=true
+          fi
+
+          SYNC_SOURCE="$BOOTSTRAPPED"
+
+          if [[ "$EVENT_NAME" == "push" ]] \
+             && [[ -n "${BEFORE_SHA:-}" ]] \
+             && [[ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            if git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" -- | grep -Fxq 'Pridel_Flutter_Source.zip'; then
+              SYNC_SOURCE=true
+            fi
+          fi
+
+          if [[ "$SYNC_SOURCE" == "true" ]]; then
+            test -f Pridel_Flutter_Source.zip
+            rm -rf /tmp/pridel_source_sync
+            mkdir -p /tmp/pridel_source_sync
+            unzip -q Pridel_Flutter_Source.zip -d /tmp/pridel_source_sync
+
+            rm -rf "$PROJECT_DIR/lib" "$PROJECT_DIR/assets" "$PROJECT_DIR/test" "$PROJECT_DIR/tool"
+            cp -R /tmp/pridel_source_sync/lib "$PROJECT_DIR/lib"
+            cp -R /tmp/pridel_source_sync/assets "$PROJECT_DIR/assets"
+            cp -R /tmp/pridel_source_sync/test "$PROJECT_DIR/test"
+            cp -R /tmp/pridel_source_sync/tool "$PROJECT_DIR/tool"
+            cp /tmp/pridel_source_sync/pubspec.yaml "$PROJECT_DIR/pubspec.yaml"
+            cp /tmp/pridel_source_sync/analysis_options.yaml "$PROJECT_DIR/analysis_options.yaml"
+            cp /tmp/pridel_source_sync/README.md "$PROJECT_DIR/README.md"
+          fi
+
+          cd "$PROJECT_DIR"
+          flutter pub get
+          python3 tool/configure_android.py .
+          dart run flutter_launcher_icons
+          dart format lib test tool
+          python3 tool/validate_seed.py
+          python3 tool/validate_project.py
+          python3 tool/validate_android.py .
+
+          if [[ "$PROJECT_DIR" != "$GITHUB_WORKSPACE/pridel" ]]; then
+            rm -rf "$GITHUB_WORKSPACE/pridel"
+            cp -R "$PROJECT_DIR" "$GITHUB_WORKSPACE/pridel"
+          fi
+
+      - name: Configure stable release signing
+        env:
+          PRIDEL_KEYSTORE_BASE64: ${{ secrets.PRIDEL_KEYSTORE_BASE64 }}
+          PRIDEL_KEYSTORE_PASSWORD: ${{ secrets.PRIDEL_KEYSTORE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${PRIDEL_KEYSTORE_BASE64:-}" || -z "${PRIDEL_KEYSTORE_PASSWORD:-}" ]]; then
+            echo "::error::Missing PRIDEL_KEYSTORE_BASE64 or PRIDEL_KEYSTORE_PASSWORD repository secret."
+            exit 1
+          fi
+
+          printf '%s' "$PRIDEL_KEYSTORE_BASE64" | base64 --decode > pridel/android/app/pridel-release.jks
+
+          {
+            echo "storePassword=$PRIDEL_KEYSTORE_PASSWORD"
+            echo "keyPassword=$PRIDEL_KEYSTORE_PASSWORD"
+            echo "keyAlias=pridel"
+            echo "storeFile=pridel-release.jks"
+          } > pridel/android/key.properties
+
+          chmod 600 pridel/android/app/pridel-release.jks pridel/android/key.properties
+
+      - name: Analyze
+        working-directory: pridel
+        run: flutter analyze
+
+      - name: Tests
+        working-directory: pridel
+        run: flutter test
+
+      - name: Build signed release APK
+        working-directory: pridel
+        run: flutter build apk --release --build-number "${{ github.run_number }}"
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs pridel/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRIDEL-Flutter-APK-${{ github.run_number }}
+          path: pridel/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove signing secrets before commit
+        if: always()
+        shell: bash
+        run: |
+          rm -f pridel/android/app/pridel-release.jks pridel/android/key.properties
+
+      - name: Commit full Flutter project
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pridel
+          if git diff --cached --quiet; then
+            echo "Full Flutter project is already up to date."
+          else
+            git commit -m "Update full PRIDEL Flutter project [skip ci]"
+            git push
+          fi
