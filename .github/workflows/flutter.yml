@@ -1,0 +1,72 @@
+name: Build PRIDEL Flutter APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Pridel_Flutter_Source.zip'
+      - '.github/workflows/flutter.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Unpack and validate source
+        run: |
+          rm -rf /tmp/pridel_source /tmp/pridel
+          mkdir -p /tmp/pridel_source
+          unzip -q Pridel_Flutter_Source.zip -d /tmp/pridel_source
+          python /tmp/pridel_source/tool/validate_seed.py
+          python /tmp/pridel_source/tool/validate_project.py
+
+      - name: Create clean Flutter project
+        run: |
+          flutter create --platforms=android,ios --org sk.pridel --project-name pridel /tmp/pridel
+          cp /tmp/pridel_source/pubspec.yaml /tmp/pridel/pubspec.yaml
+          cp /tmp/pridel_source/analysis_options.yaml /tmp/pridel/analysis_options.yaml
+          rm -rf /tmp/pridel/lib /tmp/pridel/assets /tmp/pridel/test
+          cp -R /tmp/pridel_source/lib /tmp/pridel/lib
+          cp -R /tmp/pridel_source/assets /tmp/pridel/assets
+          cp -R /tmp/pridel_source/test /tmp/pridel/test
+          sed -i 's/android:label="pridel"/android:label="PRÍDEL" android:allowBackup="false" android:usesCleartextTraffic="false"/' /tmp/pridel/android/app/src/main/AndroidManifest.xml
+
+      - name: Dependencies
+        working-directory: /tmp/pridel
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: /tmp/pridel
+        run: flutter analyze
+
+      - name: Tests
+        working-directory: /tmp/pridel
+        run: flutter test
+
+      - name: Build debug APK
+        working-directory: /tmp/pridel
+        run: flutter build apk --debug
+
+      - name: Prepare artifact
+        run: cp /tmp/pridel/build/app/outputs/flutter-apk/app-debug.apk PRIDEL-Flutter-beta.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRIDEL-Flutter-APK
+          path: PRIDEL-Flutter-beta.apk
+          if-no-files-found: error
+          retention-days: 30
